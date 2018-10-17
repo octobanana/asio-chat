@@ -25,6 +25,13 @@ public:
   {
   }
 
+  chat_message(std::string const& str)
+  {
+    body_length(str.size());
+    std::memcpy(body(), str.data(), body_length());
+    encode_header();
+  }
+
   const char* data() const
   {
     return data_;

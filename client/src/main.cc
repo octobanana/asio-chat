@@ -19,17 +19,19 @@ using boost::asio::ip::tcp;
 #include <iostream>
 #include <thread>
 #include <string>
+#include <atomic>
 
-typedef std::deque<chat_message> chat_message_queue;
+using chat_message_queue = std::deque<chat_message>;
 
 class chat_client
 {
 public:
 
-  chat_client(boost::asio::io_context& io_context,
+  explicit chat_client(boost::asio::io_context& io_context, std::atomic_bool& connected,
     const tcp::resolver::results_type& endpoints) :
     io_context_ {io_context},
-    socket_ {io_context}
+    socket_ {io_context},
+    connected_ {connected}
   {
     do_connect(endpoints);
   }
@@ -54,7 +56,7 @@ public:
     boost::asio::post(io_context_,
       [this]()
       {
-        socket_.close();
+        do_close();
       }
     );
   }
@@ -69,6 +71,11 @@ private:
         if (!ec)
         {
           do_read_header();
+        }
+        else
+        {
+          connected_.store(false);
+          return;
         }
       }
     );
@@ -86,7 +93,7 @@ private:
         }
         else
         {
-          socket_.close();
+          do_close();
         }
       }
     );
@@ -112,6 +119,11 @@ private:
             std::string msg {jres["msg"].get<std::string>()};
             std::cout << usr << "> " << msg << "\n";
           }
+          if (type == "srv")
+          {
+            std::string str {jres["str"].get<std::string>()};
+            std::cout << "server> " << str << "\n";
+          }
           // else if (type == "")
           // {
           //   // do something else
@@ -121,7 +133,7 @@ private:
         }
         else
         {
-          socket_.close();
+          do_close();
         }
       }
     );
@@ -144,15 +156,22 @@ private:
         }
         else
         {
-          socket_.close();
+          do_close();
         }
       }
     );
   }
 
+  void do_close()
+  {
+    connected_.store(false);
+    socket_.close();
+  }
+
 private:
   boost::asio::io_context& io_context_;
   tcp::socket socket_;
+  std::atomic_bool& connected_;
   chat_message read_msg_;
   chat_message_queue write_msgs_;
 };
@@ -174,15 +193,16 @@ int main(int argc, char* argv[])
 
     tcp::resolver resolver(io_context);
     auto endpoints = resolver.resolve(argv[1], argv[2]);
-    chat_client c(io_context, endpoints);
+    std::atomic_bool connected {true};
+    chat_client client {io_context, connected, endpoints};
 
-    std::thread t([&io_context](){ io_context.run(); });
+    std::thread thread {[&io_context](){ io_context.run(); }};
 
     std::cout << "Welcome!\n";
 
     // main loop
     std::string input;
-    for (;;)
+    while (connected.load())
     {
       if (! std::getline(std::cin, input))
       {
@@ -198,11 +218,44 @@ int main(int argc, char* argv[])
       else if (input.at(0) == '/')
       {
         // treat input that begins with '/' as special command
+
         if (input == "/quit")
         {
           std::cerr << "Exiting...\n";
           // exit the program
           break;
+        }
+        else if (input.find("/name") == 0)
+        {
+          auto name_old = name;
+          name = input.substr(input.find_first_of(" ") + 1);
+          std::cerr << "name> '" << name_old << "' is now '" << name << "'\n";
+          continue;
+        }
+        else if (input.find("/auth") == 0)
+        {
+          // format : '/auth <password>'
+
+          // send user and pass
+
+          // build up json body message
+          Json jreq;
+          jreq["type"] = "auth";
+          jreq["user"] = name;
+          jreq["pass"] = input.substr(input.find_first_of(" ") + 1);
+          std::string req {jreq.dump()};
+
+          // check length of req string
+          if (req.size() > chat_message::max_body_length)
+          {
+            std::cerr << "Error: message length too long\n";
+            continue;
+          }
+
+          // send the message
+          chat_message msg {req};
+          client.write(msg);
+          continue;
         }
         // else if (input == "")
         // {
@@ -234,16 +287,13 @@ int main(int argc, char* argv[])
         }
 
         // send the message
-        chat_message msg;
-        msg.body_length(req.size());
-        std::memcpy(msg.body(), req.data(), msg.body_length());
-        msg.encode_header();
-        c.write(msg);
+        chat_message msg {req};
+        client.write(msg);
       }
     }
 
-    c.close();
-    t.join();
+    client.close();
+    thread.join();
   }
   catch (std::exception& e)
   {

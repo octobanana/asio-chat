@@ -54,9 +54,26 @@ public:
     participants_.erase(participant);
   }
 
-  void deliver(const chat_message& msg)
+  void deliver(chat_message const& msg)
   {
-    recent_msgs_.push_back(msg);
+    recent_msgs_.emplace_back(msg);
+
+    while (recent_msgs_.size() > max_recent_msgs)
+    {
+      recent_msgs_.pop_front();
+    }
+
+    for (auto participant: participants_)
+    {
+      participant->deliver(msg);
+    }
+  }
+
+  void deliver(std::string const& str)
+  {
+    chat_message msg {str};
+
+    recent_msgs_.emplace_back(msg);
 
     while (recent_msgs_.size() > max_recent_msgs)
     {
@@ -91,14 +108,26 @@ public:
 
   void start()
   {
-    room_.join(shared_from_this());
     do_read_header();
   }
 
-  void deliver(const chat_message& msg)
+  void deliver(chat_message const& msg)
   {
     bool write_in_progress = !write_msgs_.empty();
-    write_msgs_.push_back(msg);
+    write_msgs_.emplace_back(msg);
+
+    if (! write_in_progress)
+    {
+      do_write();
+    }
+  }
+
+  void deliver(std::string const& str)
+  {
+    chat_message msg {str};
+
+    bool write_in_progress = !write_msgs_.empty();
+    write_msgs_.emplace_back(msg);
 
     if (! write_in_progress)
     {
@@ -130,6 +159,7 @@ private:
   void do_read_body()
   {
     auto self(shared_from_this());
+
     boost::asio::async_read(socket_,
       boost::asio::buffer(read_msg_.body(), read_msg_.body_length()),
       [this, self](boost::system::error_code ec, std::size_t /*length*/)
@@ -143,15 +173,59 @@ private:
           std::string type {jreq["type"].get<std::string>()};
           std::cerr << "type: " << type << "\n\n";
 
-          // switch on type and perform action
-          if (type == "msg")
+          if (auth_)
           {
-            room_.deliver(read_msg_);
+            // switch on type and perform action
+            if (type == "msg")
+            {
+              room_.deliver(read_msg_);
+            }
+            // else if (type == "")
+            // {
+            //   // do something else
+            // }
           }
-          // else if (type == "")
-          // {
-          //   // do something else
-          // }
+          else
+          {
+            if (type == "auth")
+            {
+              std::string user {jreq["user"].get<std::string>()};
+              std::string pass {jreq["pass"].get<std::string>()};
+
+              if (user == "user" && pass == "pass")
+              {
+                auth_ = true;
+
+                Json jres;
+                jres["type"] = "srv";
+                jres["str"] = "Success: logged in";
+
+                // send just to user
+                deliver(jres.dump());
+                room_.join(shared_from_this());
+              }
+              else
+              {
+                Json jres;
+                jres["type"] = "srv";
+                jres["str"] = "Error: incorrect user or pass, disconnecting...";
+
+                // send just to user
+                deliver(jres.dump());
+
+                // close connection
+                do_close();
+              }
+            }
+            else
+            {
+              Json jres;
+              jres["type"] = "srv";
+              jres["str"] = "Error: please authenticate with '/auth <password>'";
+
+              deliver(jres.dump());
+            }
+          }
 
           do_read_header();
         }
@@ -166,6 +240,7 @@ private:
   void do_write()
   {
     auto self(shared_from_this());
+
     boost::asio::async_write(socket_,
       boost::asio::buffer(write_msgs_.front().data(),
       write_msgs_.front().length()),
@@ -175,7 +250,7 @@ private:
         {
           write_msgs_.pop_front();
 
-          if (!write_msgs_.empty())
+          if (! write_msgs_.empty())
           {
             do_write();
           }
@@ -188,10 +263,23 @@ private:
     );
   }
 
+  void do_close()
+  {
+    // send a tcp shutdown
+    boost::system::error_code ec;
+    socket_.shutdown(tcp::socket::shutdown_send, ec);
+
+    if (ec)
+    {
+      return;
+    }
+  }
+
   tcp::socket socket_;
   chat_room& room_;
   chat_message read_msg_;
   chat_message_queue write_msgs_;
+  bool auth_ {false};
 };
 
 class chat_server
