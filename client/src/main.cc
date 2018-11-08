@@ -115,12 +115,21 @@ private:
           // switch on type and perform action
           if (type == "msg")
           {
-            std::string usr {jres["usr"].get<std::string>()};
+            // regular message
+            std::string user {jres["user"].get<std::string>()};
             std::string msg {jres["msg"].get<std::string>()};
-            std::cout << usr << "> " << msg << "\n";
+            std::cout << user << "> " << msg << "\n";
           }
-          if (type == "srv")
+          else if (type == "prv")
           {
+            // private message
+            std::string from {jres["from"].get<std::string>()};
+            std::string msg {jres["msg"].get<std::string>()};
+            std::cout << "[prv]" << from << "> " << msg << "\n";
+          }
+          else if (type == "srv")
+          {
+            // server message
             std::string str {jres["str"].get<std::string>()};
             std::cout << "server> " << str << "\n";
           }
@@ -180,19 +189,16 @@ int main(int argc, char* argv[])
 {
   try
   {
-    if (argc != 4)
+    if (argc != 2)
     {
-      std::cerr << "Usage: chat_client <host> <port> <name>\n";
+      std::cerr << "Usage: chat_client <port>\n";
       return 1;
     }
-
-    // the users name
-    std::string name {argv[3]};
 
     boost::asio::io_context io_context;
 
     tcp::resolver resolver(io_context);
-    auto endpoints = resolver.resolve(argv[1], argv[2]);
+    auto endpoints = resolver.resolve("127.0.0.1", argv[1]);
     std::atomic_bool connected {true};
     chat_client client {io_context, connected, endpoints};
 
@@ -202,6 +208,7 @@ int main(int argc, char* argv[])
 
     // main loop
     std::string input;
+    std::string name;
     while (connected.load())
     {
       if (! std::getline(std::cin, input))
@@ -219,30 +226,55 @@ int main(int argc, char* argv[])
       {
         // treat input that begins with '/' as special command
 
-        if (input == "/quit")
+        if (input == "/help")
+        {
+          std::cerr
+          << "/help\n"
+          << "  -> display the help output\n"
+          << "/auth <user> <pass>\n"
+          << "  -> login to the server\n"
+          << "/quit\n"
+          << "  -> close the connection and exit the program\n"
+          << "/priv <user> <regular text here>\n"
+          << "  -> send text as message to single user\n"
+          << "<regular text here>\n"
+          << "  -> send text as message to chat room\n"
+          << "\n";
+          continue;
+        }
+        else if (input == "/quit")
         {
           std::cerr << "Exiting...\n";
           // exit the program
           break;
         }
-        else if (input.find("/name") == 0)
-        {
-          auto name_old = name;
-          name = input.substr(input.find_first_of(" ") + 1);
-          std::cerr << "name> '" << name_old << "' is now '" << name << "'\n";
-          continue;
-        }
         else if (input.find("/auth") == 0)
         {
-          // format : '/auth <password>'
+          // format : '/auth <name> <password>'
+
+          auto pos_user = input.find_first_of(" ") + 1;
+          if (pos_user == std::string::npos)
+          {
+            std::cerr << "Error: incorrect <name> <password> format\n";
+            continue;
+          }
+
+          auto pos_pass = input.substr(pos_user).find_first_of(" ") + pos_user + 1;
+          if (pos_pass == std::string::npos)
+          {
+            std::cerr << "Error: incorrect <name> <password> format\n";
+            continue;
+          }
+
+          // set the users name
+          name = input.substr(pos_user, pos_pass - pos_user - 1);
 
           // send user and pass
-
           // build up json body message
           Json jreq;
           jreq["type"] = "auth";
           jreq["user"] = name;
-          jreq["pass"] = input.substr(input.find_first_of(" ") + 1);
+          jreq["pass"] = input.substr(pos_pass);
           std::string req {jreq.dump()};
 
           // check length of req string
@@ -256,6 +288,44 @@ int main(int argc, char* argv[])
           chat_message msg {req};
           client.write(msg);
           continue;
+        }
+        else if (input.find("/priv") == 0)
+        {
+          // /priv <user> <regular text here>
+          // send private message to another user
+
+          auto pos_user = input.find_first_of(" ") + 1;
+          if (pos_user == std::string::npos)
+          {
+            std::cerr << "Error: incorrect <name> <password> format\n";
+            continue;
+          }
+
+          auto pos_msg = input.substr(pos_user).find_first_of(" ") + pos_user + 1;
+          if (pos_msg == std::string::npos)
+          {
+            std::cerr << "Error: incorrect <name> <password> format\n";
+            continue;
+          }
+
+          // build up json body message
+          Json jreq;
+          jreq["type"] = "prv";
+          jreq["user"] = name;
+          jreq["to"] = input.substr(pos_user, pos_msg - pos_user - 1);
+          jreq["msg"] = input.substr(pos_msg);
+          std::string req {jreq.dump()};
+
+          // check length of req string
+          if (req.size() > chat_message::max_body_length)
+          {
+            std::cerr << "Error: message length too long\n";
+            continue;
+          }
+
+          // send the message
+          chat_message msg {req};
+          client.write(msg);
         }
         // else if (input == "")
         // {
@@ -275,7 +345,7 @@ int main(int argc, char* argv[])
         // build up json body message
         Json jreq;
         jreq["type"] = "msg";
-        jreq["usr"] = name;
+        jreq["user"] = name;
         jreq["msg"] = input;
         std::string req {jreq.dump()};
 

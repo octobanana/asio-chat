@@ -21,6 +21,16 @@ using boost::asio::ip::tcp;
 #include <memory>
 #include <set>
 #include <utility>
+#include <unordered_map>
+
+// passwords should obviously be hashed and salted for real use
+using Users = std::unordered_map<std::string, std::string>;
+Users const user_db {
+  {"admin", "password"},
+  {"alice", "hunter2"},
+  {"rabbit", "verylate"},
+  {"madhatter", "teaparty"},
+};
 
 using chat_message_queue = std::deque<chat_message>;
 
@@ -39,9 +49,19 @@ class chat_room
 {
 public:
 
-  void join(chat_participant_ptr participant)
+  bool contains(std::string name)
   {
-    participants_.insert(participant);
+    if (participants_.find(name) == participants_.end())
+    {
+      return false;
+    }
+
+    return true;
+  }
+
+  void join(std::string name, chat_participant_ptr participant)
+  {
+    participants_.emplace(name, participant);
 
     for (auto msg: recent_msgs_)
     {
@@ -49,9 +69,9 @@ public:
     }
   }
 
-  void leave(chat_participant_ptr participant)
+  void leave(std::string name)
   {
-    participants_.erase(participant);
+    participants_.erase(name);
   }
 
   void deliver(chat_message const& msg)
@@ -65,7 +85,7 @@ public:
 
     for (auto participant: participants_)
     {
-      participant->deliver(msg);
+      participant.second->deliver(msg);
     }
   }
 
@@ -82,16 +102,30 @@ public:
 
     for (auto participant: participants_)
     {
-      participant->deliver(msg);
+      participant.second->deliver(msg);
+    }
+  }
+
+  void deliver(std::string to, std::string from, std::string const& msg)
+  {
+    auto user = participants_.find(to);
+    if (user != participants_.end())
+    {
+      Json jres;
+      jres["type"] = "prv";
+      jres["from"] = from;
+      jres["msg"] = msg;
+
+      // send a message to the user
+      user->second->deliver(jres.dump());
     }
   }
 
 private:
 
-  std::set<chat_participant_ptr> participants_;
-  enum { max_recent_msgs = 100 };
+  int const max_recent_msgs {128};
   chat_message_queue recent_msgs_;
-
+  std::unordered_map<std::string, chat_participant_ptr> participants_;
 };
 
 class chat_session :
@@ -150,7 +184,7 @@ private:
         }
         else
         {
-          room_.leave(shared_from_this());
+          room_.leave(user_);
         }
       }
     );
@@ -169,7 +203,7 @@ private:
           // parse json from body
           std::string req {read_msg_.body(), read_msg_.body_length()};
           Json jreq = Json::parse(req);
-          std::cerr << "jreq:\n" << jreq.dump() << "\n";
+          std::cerr << "request: " << jreq.dump() << "\n";
           std::string type {jreq["type"].get<std::string>()};
           std::cerr << "type: " << type << "\n\n";
 
@@ -179,6 +213,14 @@ private:
             if (type == "msg")
             {
               room_.deliver(read_msg_);
+            }
+            else if (type == "prv")
+            {
+              std::string to {jreq["to"].get<std::string>()};
+              std::string msg {jreq["msg"].get<std::string>()};
+
+              // send private message to user
+              room_.deliver(to, user_, msg);
             }
             // else if (type == "")
             // {
@@ -192,17 +234,21 @@ private:
               std::string user {jreq["user"].get<std::string>()};
               std::string pass {jreq["pass"].get<std::string>()};
 
-              if (user == "user" && pass == "pass")
+              auto check_user = user_db.find(user);
+              if (check_user != user_db.end() && check_user->first == user && check_user->second == pass && ! room_.contains(user))
               {
                 auth_ = true;
+                user_ = user;
 
                 Json jres;
                 jres["type"] = "srv";
                 jres["str"] = "Success: logged in";
 
-                // send just to user
+                // send a message to user
                 deliver(jres.dump());
-                room_.join(shared_from_this());
+
+                // add user to chat room
+                room_.join(user_, shared_from_this());
               }
               else
               {
@@ -221,7 +267,7 @@ private:
             {
               Json jres;
               jres["type"] = "srv";
-              jres["str"] = "Error: please authenticate with '/auth <password>'";
+              jres["str"] = "Error: please authenticate with '/auth <user> <pass>'";
 
               deliver(jres.dump());
             }
@@ -231,7 +277,7 @@ private:
         }
         else
         {
-          room_.leave(shared_from_this());
+          room_.leave(user_);
         }
       }
     );
@@ -257,7 +303,7 @@ private:
         }
         else
         {
-          room_.leave(shared_from_this());
+          room_.leave(user_);
         }
       }
     );
@@ -280,6 +326,7 @@ private:
   chat_message read_msg_;
   chat_message_queue write_msgs_;
   bool auth_ {false};
+  std::string user_ {};
 };
 
 class chat_server
